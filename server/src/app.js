@@ -22,22 +22,24 @@ const app = express();
 
 app.disable("x-powered-by");
 
-/* =========================
-   SECURITY
-========================= */
-
 app.use(
     helmet({
         crossOriginResourcePolicy: false
     })
 );
 
+const allowedOrigins = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173"
+];
+
+if (process.env.FRONTEND_URL) {
+    allowedOrigins.push(process.env.FRONTEND_URL);
+}
+
 app.use(
     cors({
-        origin: [
-            "http://localhost:5173",
-            "http://127.0.0.1:5173"
-        ],
+        origin: allowedOrigins,
         methods: [
             "GET",
             "POST",
@@ -53,10 +55,6 @@ app.use(
     })
 );
 
-/* =========================
-   BODY PARSING
-========================= */
-
 app.use(
     express.json({
         limit: "1mb"
@@ -70,15 +68,11 @@ app.use(
     })
 );
 
-/* =========================
-   RATE LIMITING
-========================= */
-
 const apiLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
     max: 300,
     standardHeaders: true,
-    legacyHeaders: false,
+    legacyHeaders: true,
     message: {
         success: false,
         message: "Too many requests. Please try again later."
@@ -87,20 +81,12 @@ const apiLimiter = rateLimit({
 
 app.use("/api", apiLimiter);
 
-/* =========================
-   API ROUTES
-========================= */
-
 app.use("/api/auth", authRoutes);
 app.use("/api/transactions", transactionRoutes);
 app.use("/api/networks", networkRoutes);
 app.use("/api/cases", fraudCaseRoutes);
 app.use("/api/alerts", alertRoutes);
 app.use("/api/attack-prediction", attackPredictionRoutes);
-
-/* =========================
-   BASIC ROUTES
-========================= */
 
 app.get("/", (req, res) => {
     res.json({
@@ -119,20 +105,12 @@ app.get("/health", (req, res) => {
     });
 });
 
-/* =========================
-   404 HANDLER
-========================= */
-
 app.use((req, res) => {
     res.status(404).json({
         success: false,
         message: "API endpoint not found"
     });
 });
-
-/* =========================
-   GLOBAL ERROR HANDLER
-========================= */
 
 app.use((error, req, res, next) => {
     console.error("GLOBAL SERVER ERROR:");
@@ -143,10 +121,6 @@ app.use((error, req, res, next) => {
         message: "Internal server error"
     });
 });
-
-/* =========================
-   SERVER START
-========================= */
 
 const PORT = process.env.PORT || 5000;
 
@@ -167,12 +141,12 @@ const startServer = async () => {
 
         const server = app.listen(
             PORT,
-            "127.0.0.1",
+            "0.0.0.0",
             () => {
                 console.log("========================================");
                 console.log("FraudShield-X server running");
-                console.log(`http://127.0.0.1:${PORT}`);
-                console.log(`http://localhost:${PORT}`);
+                console.log(`Port: ${PORT}`);
+                console.log("Host: 0.0.0.0");
                 console.log("Helmet security: ENABLED");
                 console.log("Rate limiting: ENABLED");
                 console.log("Authentication: ENABLED");
