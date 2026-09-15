@@ -1,170 +1,308 @@
 const axios = require("axios");
+const Transaction = require("../models/Transaction");
 
 const ML_SERVICE_URL =
-    process.env.ML_SERVICE_URL || "http://127.0.0.1:8000";
+    process.env.ML_SERVICE_URL ||
+    "http://127.0.0.1:8000";
 
-/*
- * Normalize ML probability to percentage format: 0 - 100.
- *
- * Examples:
- * 0.10   -> 10
- * 0.75   -> 75
- * 0.90   -> 90
- * 10     -> 10
- * 75     -> 75
- * 100    -> 100
- */
-const normalizeProbability = (value) => {
-    const number = Number(value);
-
-    if (!Number.isFinite(number)) {
-        return 0;
-    }
-
-    if (number >= 0 && number <= 1) {
-        return Math.round(number * 10000) / 100;
-    }
-
-    return Math.round(
-        Math.min(Math.max(number, 0), 100) * 100
-    ) / 100;
-};
-
-const predictFraud = async (data = {}) => {
-    const {
-        amount = 0,
-        merchant = "",
-        location = "",
-        paymentMethod = "",
-        deviceId = "",
-        userId = ""
-    } = data;
-
-    console.log("========================================");
-    console.log("ML FRAUD PREDICTION");
-    console.log("ML SERVICE:", ML_SERVICE_URL);
-    console.log("User:", userId);
-    console.log("Amount:", amount);
-    console.log("========================================");
-
+const predictFraud = async (data) => {
     try {
+        const {
+            userId,
+            amount,
+            merchant,
+            location,
+            paymentMethod,
+            deviceId
+        } = data;
+
+        // ----------------------------------------
+        // Historical user frequency
+        // ----------------------------------------
+
+        const userFrequency = userId
+            ? await Transaction.countDocuments({
+                  userId
+              })
+            : 1;
+
+        // ----------------------------------------
+        // Historical device frequency
+        // ----------------------------------------
+
+        const deviceFrequency = deviceId
+            ? await Transaction.countDocuments({
+                  deviceId
+              })
+            : 1;
+
+        // ----------------------------------------
+        // Shared device detection
+        // ----------------------------------------
+
+        let sharedDevice = 0;
+
+        if (deviceId) {
+            const usersOnDevice =
+                await Transaction.distinct(
+                    "userId",
+                    {
+                        deviceId
+                    }
+                );
+
+            if (usersOnDevice.length > 1) {
+                sharedDevice = 1;
+            }
+        }
+
+        // ----------------------------------------
+        // Merchant risk
+        // ----------------------------------------
+
+        let merchantRisk = 0;
+
+        if (merchant) {
+            const merchantTransactions =
+                await Transaction.find(
+                    { merchant },
+                    {
+                        status: 1
+                    }
+                ).lean();
+
+            if (merchantTransactions.length > 0) {
+                const fraudCount =
+                    merchantTransactions.filter(
+                        (transaction) =>
+                            transaction.status === "FRAUD"
+                    ).length;
+
+                const suspiciousCount =
+                    merchantTransactions.filter(
+                        (transaction) =>
+                            transaction.status ===
+                            "SUSPICIOUS"
+                    ).length;
+
+                const total =
+                    merchantTransactions.length;
+
+                merchantRisk = Math.min(
+                    100,
+                    (
+                        (
+                            fraudCount * 100 +
+                            suspiciousCount * 50
+                        ) /
+                        total
+                    )
+                );
+            }
+        }
+
+        // ----------------------------------------
+        // Initial risk score for ML
+        // ----------------------------------------
+
+        let riskScore = 0;
+
+        if (Number(amount) >= 100000) {
+            riskScore += 60;
+        } else if (Number(amount) >= 50000) {
+            riskScore += 40;
+        } else if (Number(amount) >= 25000) {
+            riskScore += 20;
+        }
+
+        if (deviceFrequency >= 5) {
+            riskScore += 15;
+        }
+
+        if (userFrequency >= 5) {
+            riskScore += 10;
+        }
+
+        if (sharedDevice >= 1) {
+            riskScore += 10;
+        }
+
+        if (merchantRisk >= 70) {
+            riskScore += 20;
+        }
+
+        riskScore = Math.min(
+            100,
+            riskScore
+        );
+
+        // ----------------------------------------
+        // Prepare ML request
+        // ----------------------------------------
+
+        const payload = {
+            amount: Number(amount) || 0,
+            riskScore,
+            deviceFrequency,
+            userFrequency,
+            sharedDevice,
+            merchantRisk
+        };
+
+        console.log(
+            "========================================"
+        );
+        console.log("ML PREDICTION REQUEST");
+        console.log(
+            "ML SERVICE:",
+            ML_SERVICE_URL
+        );
+        console.log("FEATURES:", payload);
+        console.log(
+            "========================================"
+        );
+
+        // ----------------------------------------
+        // Call Python ML service
+        // ----------------------------------------
+
         const response = await axios.post(
             `${ML_SERVICE_URL}/predict`,
+            payload,
             {
-                amount: Number(amount) || 0,
-                merchant,
-                location,
-                paymentMethod,
-                deviceId,
-                userId
-            },
-            {
-                timeout: 10000,
+                timeout: 30000,
                 headers: {
-                    "Content-Type": "application/json"
+                    "Content-Type":
+                        "application/json"
                 }
             }
         );
 
-        const result = response.data || {};
+        const result = response.data;
 
-        /*
-         * Support different response names from the ML service.
-         */
-        const rawProbability =
-            result.fraudProbability ??
-            result.fraud_probability ??
-            result.probability ??
-            result.mlProbability ??
-            result.ml_probability ??
-            0;
-
-        const fraudProbability =
-            normalizeProbability(rawProbability);
-
-        /*
-         * Keep prediction/status information if supplied
-         * by the ML service.
-         */
-        const prediction =
-            result.prediction ??
-            result.label ??
-            result.classification ??
-            null;
-
-        const isFraud =
-            result.isFraud === true ||
-            result.is_fraud === true ||
-            prediction === "FRAUD" ||
-            prediction === "fraud" ||
-            fraudProbability >= 90;
-
-        let mlStatus = "NORMAL";
-
-        if (fraudProbability >= 90) {
-            mlStatus = "HIGH_RISK";
-        } else if (fraudProbability >= 70) {
-            mlStatus = "SUSPICIOUS";
-        } else if (fraudProbability >= 40) {
-            mlStatus = "ELEVATED";
+        if (!result || result.success !== true) {
+            throw new Error(
+                result?.message ||
+                "ML service returned an invalid response"
+            );
         }
 
-        console.log("========================================");
-        console.log("ML PREDICTION RESULT");
-        console.log("Raw probability:", rawProbability);
-        console.log("Normalized probability:", fraudProbability);
-        console.log("Prediction:", prediction);
-        console.log("Is Fraud:", isFraud);
-        console.log("ML Status:", mlStatus);
-        console.log("========================================");
+        const fraudProbability = Number(
+            result.fraudProbability ?? 0
+        );
+
+        const mlPrediction =
+            result.isFraud === true ||
+            result.prediction === 1
+                ? "FRAUD"
+                : fraudProbability >= 40
+                ? "SUSPICIOUS"
+                : "SAFE";
+
+        console.log(
+            "ML PREDICTION RESULT:",
+            mlPrediction
+        );
+
+        console.log(
+            "ML FRAUD PROBABILITY:",
+            fraudProbability
+        );
 
         return {
-            success: true,
-
             fraudProbability,
-
-            /*
-             * Keep aliases for compatibility with existing
-             * FraudShield-X services.
-             */
-            mlProbability: fraudProbability,
-
-            prediction,
-            isFraud,
-            mlStatus,
-
-            model: result.model || "fraud_model.pkl",
-
-            rawResponse: result
+            mlPrediction,
+            prediction: Number(
+                result.prediction ?? 0
+            ),
+            isFraud:
+                result.isFraud === true,
+            status:
+                result.status || mlPrediction,
+            modelProbability: Number(
+                result.modelProbability ?? 0
+            ),
+            decisionReason:
+                result.decisionReason ||
+                "ML model prediction",
+            riskSignals:
+                Array.isArray(
+                    result.riskSignals
+                )
+                    ? result.riskSignals
+                    : [],
+            features: {
+                amount: Number(amount) || 0,
+                riskScore,
+                deviceFrequency,
+                userFrequency,
+                sharedDevice,
+                merchantRisk
+            }
         };
 
     } catch (error) {
 
-        console.error("========================================");
-        console.error("ML PREDICTION FAILED");
-        console.error("Error:", error.message);
-        console.error("========================================");
+        console.error(
+            "========================================"
+        );
 
-        /*
-         * Do not crash the complete transaction pipeline
-         * if the ML service is temporarily unavailable.
-         */
+        console.error(
+            "ML PREDICTION ERROR"
+        );
+
+        console.error(
+            "========================================"
+        );
+
+        if (error.response) {
+            console.error(
+                "ML STATUS:",
+                error.response.status
+            );
+
+            console.error(
+                "ML RESPONSE:",
+                error.response.data
+            );
+        } else {
+            console.error(
+                "ERROR:",
+                error.message
+            );
+        }
+
+        console.error(
+            "========================================"
+        );
+
+        // ----------------------------------------
+        // Safe fallback
+        // ----------------------------------------
+
         return {
-            success: false,
-
             fraudProbability: 0,
-            mlProbability: 0,
-
-            prediction: null,
+            mlPrediction: "UNKNOWN",
+            prediction: 0,
             isFraud: false,
-            mlStatus: "UNAVAILABLE",
-
+            status: "UNKNOWN",
+            modelProbability: 0,
+            decisionReason:
+                "ML service unavailable",
+            riskSignals: [],
+            features: {
+                amount: Number(data.amount) || 0,
+                riskScore: 0,
+                deviceFrequency: 1,
+                userFrequency: 1,
+                sharedDevice: 0,
+                merchantRisk: 0
+            },
             error: error.message
         };
     }
 };
 
 module.exports = {
-    predictFraud,
-    normalizeProbability
+    predictFraud
 };
