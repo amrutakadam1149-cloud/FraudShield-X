@@ -47,14 +47,34 @@ const connectDB = async () => {
         console.error("Error message:", error.message);
         console.error("Error code:", error.code || "NONE");
 
-        if (error.reason) {
-            console.error("MongoDB reason:");
-            console.error(error.reason);
+        if (error.reason && error.reason.servers) {
+            console.error("SERVER CONNECTION DETAILS:");
+
+            for (const [address, server] of error.reason.servers) {
+                console.error("----------------------------------------");
+                console.error("Server:", address);
+                console.error(
+                    "Server type:",
+                    server.type || "UNKNOWN"
+                );
+
+                if (server.error) {
+                    console.error(
+                        "SERVER ERROR:",
+                        server.error.message ||
+                        String(server.error)
+                    );
+                } else {
+                    console.error("SERVER ERROR: NONE");
+                }
+            }
         }
 
         if (error.cause) {
-            console.error("MongoDB cause:");
-            console.error(error.cause);
+            console.error(
+                "CAUSE:",
+                error.cause.message || String(error.cause)
+            );
         }
 
         console.error("========================================");
@@ -68,11 +88,16 @@ mongoose.connection.on("connected", () => {
 });
 
 mongoose.connection.on("error", (error) => {
-    console.error("MongoDB event ERROR:", error.message);
+    console.error(
+        "MongoDB event ERROR:",
+        error.message
+    );
 });
 
 mongoose.connection.on("disconnected", () => {
-    console.error("MongoDB event: DISCONNECTED");
+    console.error(
+        "MongoDB event: DISCONNECTED"
+    );
 });
 
 module.exports = connectDB;
