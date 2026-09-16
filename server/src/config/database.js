@@ -3,43 +3,34 @@ const dns = require("dns");
 const net = require("net");
 const tls = require("tls");
 
-const TEST_TIMEOUT = 10000;
+function getHosts(uri) {
+    const cleanUri = uri
+        .replace(/^mongodb(\+srv)?:\/\//, "")
+        .split("@")
+        .pop()
+        .split("/")[0]
+        .split("?")[0];
 
-function getMongoUri() {
-    const uri = process.env.MONGODB_URI;
+    return cleanUri
+        .split(",")
+        .map((host) => host.trim())
+        .filter(Boolean)
+        .map((host) => {
+            const parts = host.split(":");
 
-    if (!uri) {
-        throw new Error("MONGODB_URI is missing.");
-    }
-
-    return uri.trim();
+            return {
+                host: parts[0],
+                port: Number(parts[1] || 27017)
+            };
+        });
 }
 
-function getHostsFromUri(uri) {
-    try {
-        const withoutProtocol = uri.replace(/^mongodb(?:\+srv)?:\/\//, "");
-        const withoutCredentials = withoutProtocol.includes("@")
-            ? withoutProtocol.substring(withoutProtocol.lastIndexOf("@") + 1)
-            : withoutProtocol;
-
-        const hostPart = withoutCredentials.split("/")[0];
-        const hosts = hostPart
-            .split(",")
-            .map((host) => host.split(":")[0].trim())
-            .filter(Boolean);
-
-        return hosts;
-    } catch (error) {
-        return [];
-    }
-}
-
-function dnsTest(host) {
+function testDNS(host) {
     return new Promise((resolve) => {
         dns.lookup(host, { family: 4 }, (error, address) => {
             if (error) {
                 console.log(`[DNS] ${host} -> FAILED`);
-                console.log(`[DNS] ${error.code || ""} ${error.message}`);
+                console.log(`[DNS] ${error.message}`);
                 resolve(false);
                 return;
             }
@@ -50,13 +41,11 @@ function dnsTest(host) {
     });
 }
 
-function tcpTest(host) {
+function testTCP(host, port) {
     return new Promise((resolve) => {
-        console.log(`[TCP] Testing ${host}:27017 ...`);
-
         const socket = net.createConnection({
             host,
-            port: 27017,
+            port,
             family: 4
         });
 
@@ -64,44 +53,59 @@ function tcpTest(host) {
 
         const finish = (result) => {
             if (finished) return;
+
             finished = true;
 
             socket.destroy();
+
             resolve(result);
         };
 
-        socket.setTimeout(TEST_TIMEOUT);
+        socket.setTimeout(10000);
 
         socket.on("connect", () => {
-            console.log(`[TCP] ${host}:27017 -> CONNECTED`);
+            console.log(
+                `[TCP] ${host}:${port} -> CONNECTED`
+            );
+
             finish(true);
         });
 
         socket.on("timeout", () => {
-            console.log(`[TCP] ${host}:27017 -> TIMEOUT`);
+            console.log(
+                `[TCP] ${host}:${port} -> TIMEOUT`
+            );
+
             finish(false);
         });
 
         socket.on("error", (error) => {
-            console.log(`[TCP] ${host}:27017 -> FAILED`);
             console.log(
-                `[TCP] ${error.code || ""} ${error.message}`
+                `[TCP] ${host}:${port} -> FAILED`
             );
+
+            console.log(
+                `[TCP] ${error.message}`
+            );
+
             finish(false);
         });
     });
 }
 
-function tlsTest(host) {
+function testTLS(host, port, minVersion, maxVersion) {
     return new Promise((resolve) => {
-        console.log(`[TLS] Testing ${host}:27017 ...`);
+        console.log(
+            `[TLS ${minVersion}-${maxVersion}] Testing ${host}:${port} ...`
+        );
 
         const socket = tls.connect({
             host,
-            port: 27017,
-            servername: host,
+            port,
             family: 4,
-            minVersion: "TLSv1.2",
+            servername: host,
+            minVersion,
+            maxVersion,
             rejectUnauthorized: true
         });
 
@@ -109,226 +113,233 @@ function tlsTest(host) {
 
         const finish = (result) => {
             if (finished) return;
+
             finished = true;
 
             socket.destroy();
+
             resolve(result);
         };
 
-        socket.setTimeout(TEST_TIMEOUT);
+        socket.setTimeout(15000);
 
         socket.on("secureConnect", () => {
-            console.log(`[TLS] ${host}:27017 -> SECURE CONNECTION`);
-
             console.log(
-                `[TLS] authorized: ${socket.authorized}`
-            );
-
-            if (socket.authorizationError) {
-                console.log(
-                    `[TLS] authorizationError: ${socket.authorizationError}`
-                );
-            }
-
-            console.log(
-                `[TLS] protocol: ${socket.getProtocol()}`
+                `[TLS ${minVersion}-${maxVersion}] ${host}:${port} -> SUCCESS`
             );
 
             console.log(
-                `[TLS] cipher: ${socket.getCipher()?.name || "unknown"}`
+                `[TLS] Negotiated protocol: ${socket.getProtocol()}`
+            );
+
+            console.log(
+                `[TLS] Cipher: ${socket.getCipher().name}`
             );
 
             finish(true);
         });
 
         socket.on("timeout", () => {
-            console.log(`[TLS] ${host}:27017 -> TIMEOUT`);
+            console.log(
+                `[TLS ${minVersion}-${maxVersion}] ${host}:${port} -> TIMEOUT`
+            );
+
             finish(false);
         });
 
         socket.on("error", (error) => {
-            console.log(`[TLS] ${host}:27017 -> FAILED`);
             console.log(
-                `[TLS] ${error.code || ""} ${error.message}`
+                `[TLS ${minVersion}-${maxVersion}] ${host}:${port} -> FAILED`
             );
+
+            console.log(
+                `[TLS] ${error.message}`
+            );
+
             finish(false);
         });
     });
 }
 
-async function connectDB() {
-    console.log("========================================");
-    console.log("MongoDB NETWORK DIAGNOSTIC");
-    console.log("========================================");
-
-    let uri;
-
+const connectDB = async () => {
     try {
-        uri = getMongoUri();
-    } catch (error) {
-        console.error(error.message);
-        throw error;
-    }
+        console.log("========================================");
+        console.log("MONGODB RENDER TLS DIAGNOSTIC");
+        console.log("========================================");
 
-    console.log("MongoDB URI found: YES");
+        const uri = process.env.MONGODB_URI;
 
-    console.log(
-        "MongoDB URI type:",
-        uri.startsWith("mongodb+srv://")
-            ? "ATLAS SRV"
-            : uri.startsWith("mongodb://")
-                ? "STANDARD mongodb://"
-                : "UNKNOWN"
-    );
-
-    const hosts = getHostsFromUri(uri);
-
-    console.log("Hosts detected:", hosts.length);
-
-    if (hosts.length === 0) {
-        throw new Error(
-            "Could not extract MongoDB hosts from MONGODB_URI."
-        );
-    }
-
-    console.log("========================================");
-    console.log("STEP 1: DNS TEST");
-    console.log("========================================");
-
-    const dnsResults = [];
-
-    for (const host of hosts) {
-        const result = await dnsTest(host);
-        dnsResults.push({
-            host,
-            success: result
-        });
-    }
-
-    console.log("========================================");
-    console.log("STEP 2: TCP TEST");
-    console.log("========================================");
-
-    const tcpResults = [];
-
-    for (const item of dnsResults) {
-        if (!item.success) {
-            console.log(
-                `[TCP] Skipping ${item.host} because DNS failed.`
-            );
-
-            tcpResults.push({
-                host: item.host,
-                success: false
-            });
-
-            continue;
+        if (!uri) {
+            throw new Error("MONGODB_URI is missing");
         }
 
-        const result = await tcpTest(item.host);
+        console.log("MongoDB URI found: YES");
 
-        tcpResults.push({
-            host: item.host,
-            success: result
-        });
-    }
+        console.log(
+            "Node version:",
+            process.version
+        );
 
-    console.log("========================================");
-    console.log("STEP 3: TLS TEST");
-    console.log("========================================");
+        console.log(
+            "Mongoose version:",
+            mongoose.version
+        );
 
-    const tlsResults = [];
+        const hosts = getHosts(uri);
 
-    for (const item of tcpResults) {
-        if (!item.success) {
-            console.log(
-                `[TLS] Skipping ${item.host} because TCP failed.`
-            );
+        console.log(
+            "MongoDB hosts:",
+            hosts.map((x) => x.host).join(", ")
+        );
 
-            tlsResults.push({
-                host: item.host,
-                success: false
-            });
+        console.log("");
+        console.log("========================================");
+        console.log("STEP 1: DNS TEST");
+        console.log("========================================");
 
-            continue;
+        let dnsOK = true;
+
+        for (const item of hosts) {
+            const result = await testDNS(item.host);
+
+            if (!result) {
+                dnsOK = false;
+            }
         }
 
-        const result = await tlsTest(item.host);
-
-        tlsResults.push({
-            host: item.host,
-            success: result
-        });
-    }
-
-    console.log("========================================");
-    console.log("DIAGNOSTIC SUMMARY");
-    console.log("========================================");
-
-    console.log("DNS RESULTS:");
-    console.log(dnsResults);
-
-    console.log("TCP RESULTS:");
-    console.log(tcpResults);
-
-    console.log("TLS RESULTS:");
-    console.log(tlsResults);
-
-    const tcpSuccess = tcpResults.some(
-        (item) => item.success
-    );
-
-    const tlsSuccess = tlsResults.some(
-        (item) => item.success
-    );
-
-    console.log("========================================");
-
-    if (!tcpSuccess) {
+        console.log("");
         console.log(
-            "RESULT: RENDER CANNOT REACH ATLAS ON TCP 27017."
-        );
-        console.log(
-            "This is a network/connectivity problem."
+            "DNS RESULT:",
+            dnsOK ? "ALL OK" : "FAILED"
         );
 
-        process.exit(1);
-    }
+        console.log("");
+        console.log("========================================");
+        console.log("STEP 2: TCP TEST");
+        console.log("========================================");
 
-    if (!tlsSuccess) {
+        let tcpOK = false;
+
+        for (const item of hosts) {
+            const result = await testTCP(
+                item.host,
+                item.port
+            );
+
+            if (result) {
+                tcpOK = true;
+            }
+        }
+
+        console.log("");
         console.log(
-            "RESULT: TCP WORKS BUT TLS HANDSHAKE FAILS."
+            "TCP RESULT:",
+            tcpOK ? "AT LEAST ONE HOST OK" : "ALL FAILED"
         );
+
+        console.log("");
+        console.log("========================================");
+        console.log("STEP 3: TLS 1.2 TEST");
+        console.log("========================================");
+
+        let tls12OK = false;
+
+        for (const item of hosts) {
+            const result = await testTLS(
+                item.host,
+                item.port,
+                "TLSv1.2",
+                "TLSv1.2"
+            );
+
+            if (result) {
+                tls12OK = true;
+            }
+        }
+
+        console.log("");
         console.log(
-            "This points to a TLS/network-path problem."
+            "TLS 1.2 RESULT:",
+            tls12OK ? "SUCCESS" : "FAILED"
         );
 
-        process.exit(1);
-    }
+        console.log("");
+        console.log("========================================");
+        console.log("STEP 4: TLS 1.3 TEST");
+        console.log("========================================");
 
-    console.log(
-        "RESULT: TCP AND TLS CONNECTIONS WORK."
-    );
+        let tls13OK = false;
 
-    console.log(
-        "Now testing Mongoose connection..."
-    );
+        for (const item of hosts) {
+            const result = await testTLS(
+                item.host,
+                item.port,
+                "TLSv1.3",
+                "TLSv1.3"
+            );
 
-    console.log("========================================");
+            if (result) {
+                tls13OK = true;
+            }
+        }
 
-    try {
+        console.log("");
+        console.log(
+            "TLS 1.3 RESULT:",
+            tls13OK ? "SUCCESS" : "FAILED"
+        );
+
+        console.log("");
+        console.log("========================================");
+        console.log("DIAGNOSTIC SUMMARY");
+        console.log("========================================");
+
+        console.log("DNS:", dnsOK ? "PASS" : "FAIL");
+        console.log("TCP:", tcpOK ? "PASS" : "FAIL");
+        console.log("TLS 1.2:", tls12OK ? "PASS" : "FAIL");
+        console.log("TLS 1.3:", tls13OK ? "PASS" : "FAIL");
+
+        console.log("");
+
+        if (!tcpOK) {
+            console.log(
+                "RESULT: Render cannot reach MongoDB Atlas."
+            );
+
+            process.exit(1);
+        }
+
+        if (!tls12OK && !tls13OK) {
+            console.log(
+                "RESULT: TCP works but both TLS 1.2 and TLS 1.3 fail."
+            );
+
+            process.exit(1);
+        }
+
+        if (tls12OK || tls13OK) {
+            console.log(
+                "RESULT: TLS works. Testing Mongoose connection..."
+            );
+        }
+
+        console.log("");
+        console.log("========================================");
+        console.log("STEP 5: MONGOOSE TEST");
+        console.log("========================================");
+
         await mongoose.connect(uri, {
             tls: true,
             family: 4,
             serverSelectionTimeoutMS: 30000,
             connectTimeoutMS: 30000,
             socketTimeoutMS: 45000,
-            heartbeatFrequencyMS: 10000,
             retryWrites: true
         });
 
+        console.log("");
         console.log("========================================");
-        console.log("MONGOOSE CONNECTION: SUCCESS");
+        console.log("MONGODB CONNECTED SUCCESSFULLY");
         console.log("========================================");
 
         console.log(
@@ -336,22 +347,18 @@ async function connectDB() {
             mongoose.connection.name
         );
 
-        console.log(
-            "Ready state:",
-            mongoose.connection.readyState
-        );
-
         return mongoose.connection;
+
     } catch (error) {
+        console.log("");
         console.log("========================================");
-        console.log("MONGOOSE CONNECTION: FAILED");
+        console.log("MONGODB CONNECTION FAILED");
         console.log("========================================");
 
-        console.log("Error name:", error.name);
-        console.log("Error message:", error.message);
+        console.log(error.message);
 
-        throw error;
+        process.exit(1);
     }
-}
+};
 
 module.exports = connectDB;
