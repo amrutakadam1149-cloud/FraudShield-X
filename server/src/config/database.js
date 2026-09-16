@@ -2,102 +2,173 @@ const mongoose = require("mongoose");
 
 const connectDB = async () => {
     try {
-        const mongoURI = process.env.MONGODB_URI;
-
-        if (!mongoURI) {
-            throw new Error("MONGODB_URI is missing");
-        }
-
         console.log("========================================");
         console.log("Connecting to MongoDB...");
-        console.log("MongoDB URI found: YES");
+        console.log("========================================");
+
+        const uri = process.env.MONGODB_URI;
+
         console.log(
-            "MongoDB URI type:",
-            mongoURI.startsWith("mongodb+srv://")
-                ? "ATLAS SRV"
-                : "OTHER"
+            "MongoDB URI found:",
+            uri ? "YES" : "NO"
         );
 
-        const hostMatch = mongoURI.match(/@([^/?]+)/);
+        if (!uri) {
+            throw new Error(
+                "MONGODB_URI environment variable is missing"
+            );
+        }
+
+        if (uri.startsWith("mongodb+srv://")) {
+            console.log(
+                "MongoDB URI type: ATLAS SRV"
+            );
+        } else if (uri.startsWith("mongodb://")) {
+            console.log(
+                "MongoDB URI type: STANDARD mongodb://"
+            );
+        } else {
+            console.log(
+                "MongoDB URI type: UNKNOWN"
+            );
+        }
+
+        const hostMatch = uri.match(
+            /@([^/?]+)/
+        );
 
         console.log(
             "MongoDB host:",
-            hostMatch ? hostMatch[1] : "NOT DETECTED"
+            hostMatch
+                ? hostMatch[1]
+                : "HIDDEN/NOT DETECTED"
+        );
+
+        console.log(
+            "Node version:",
+            process.version
+        );
+
+        console.log(
+            "Mongoose version:",
+            mongoose.version
+        );
+
+        console.log(
+            "TLS mode: ENABLED"
+        );
+
+        console.log(
+            "IPv4 mode: ENABLED"
+        );
+
+        console.log(
+            "========================================"
+        );
+
+        await mongoose.connect(uri, {
+            tls: true,
+            family: 4,
+
+            serverSelectionTimeoutMS: 30000,
+
+            connectTimeoutMS: 30000,
+
+            socketTimeoutMS: 45000,
+
+            heartbeatFrequencyMS: 10000,
+
+            retryWrites: true
+        });
+
+        console.log("========================================");
+        console.log("MONGODB CONNECTED SUCCESSFULLY");
+        console.log("========================================");
+
+        console.log(
+            "Database:",
+            mongoose.connection.name
+        );
+
+        console.log(
+            "Host:",
+            mongoose.connection.host
+        );
+
+        console.log(
+            "Ready State:",
+            mongoose.connection.readyState
         );
 
         console.log("========================================");
 
-        await mongoose.connect(mongoURI, {
-            serverSelectionTimeoutMS: 15000,
-            connectTimeoutMS: 15000
-        });
-
-        console.log("========================================");
-        console.log("MongoDB CONNECTED SUCCESSFULLY");
-        console.log("Database:", mongoose.connection.name);
-        console.log("Host:", mongoose.connection.host);
-        console.log("========================================");
+        return mongoose.connection;
 
     } catch (error) {
         console.error("========================================");
         console.error("MONGODB CONNECTION FAILED");
         console.error("========================================");
 
-        console.error("Error name:", error.name);
-        console.error("Error message:", error.message);
-        console.error("Error code:", error.code || "NONE");
+        console.error(
+            "Error name:",
+            error.name
+        );
 
-        if (error.reason && error.reason.servers) {
-            console.error("SERVER CONNECTION DETAILS:");
+        console.error(
+            "Error message:",
+            error.message
+        );
 
-            for (const [address, server] of error.reason.servers) {
-                console.error("----------------------------------------");
-                console.error("Server:", address);
+        console.error(
+            "Error code:",
+            error.code || "NONE"
+        );
+
+        console.error(
+            "Error reason:",
+            error.reason || "NONE"
+        );
+
+        console.error(
+            "Error cause:",
+            error.cause || "NONE"
+        );
+
+        if (
+            error.reason &&
+            typeof error.reason === "object"
+        ) {
+            console.error(
+                "Topology description:"
+            );
+
+            try {
                 console.error(
-                    "Server type:",
-                    server.type || "UNKNOWN"
+                    JSON.stringify(
+                        error.reason,
+                        null,
+                        2
+                    )
                 );
-
-                if (server.error) {
-                    console.error(
-                        "SERVER ERROR:",
-                        server.error.message ||
-                        String(server.error)
-                    );
-                } else {
-                    console.error("SERVER ERROR: NONE");
-                }
+            } catch (jsonError) {
+                console.error(
+                    "Could not stringify topology"
+                );
             }
         }
 
-        if (error.cause) {
-            console.error(
-                "CAUSE:",
-                error.cause.message || String(error.cause)
-            );
-        }
+        console.error(
+            "FULL ERROR STACK:"
+        );
+
+        console.error(
+            error.stack || error
+        );
 
         console.error("========================================");
 
         throw error;
     }
 };
-
-mongoose.connection.on("connected", () => {
-    console.log("MongoDB event: CONNECTED");
-});
-
-mongoose.connection.on("error", (error) => {
-    console.error(
-        "MongoDB event ERROR:",
-        error.message
-    );
-});
-
-mongoose.connection.on("disconnected", () => {
-    console.error(
-        "MongoDB event: DISCONNECTED"
-    );
-});
 
 module.exports = connectDB;
